@@ -25,3 +25,4 @@ uvicorn==0.38.0
 vercel==0.3.2
 vercel-sandbox==0.0.2
 vercel-sdk==0.0.8
+aiohttp==3.10.11

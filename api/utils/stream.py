@@ -1,6 +1,7 @@
 import json
 import traceback
 import uuid
+import httpx
 from typing import Any, Callable, Dict, Mapping, Sequence
 
 from fastapi.responses import StreamingResponse
@@ -250,3 +251,104 @@ def patch_response_with_headers(
         response.headers.setdefault("x-vercel-ai-protocol", protocol)
 
     return response
+
+
+async def stream_ollama_text(
+    ollama_url: str,
+    model: str,
+    messages: Sequence[ChatCompletionMessageParam],
+    protocol: str = "data",
+):
+    """Yield Server-Sent Events for a streaming Ollama chat completion."""
+    
+    # Tarot expert system prompt
+    TAROT_SYSTEM_PROMPT = """You are a wise and empathetic tarot reader with deep knowledge of tarot symbolism, 
+archetypes, and interpretations. You provide insightful, nuanced readings that blend traditional meanings 
+with intuitive understanding. Your readings are thoughtful, non-judgmental, and focused on empowerment 
+and personal growth. When interpreting cards, you consider their positions, relationships, and the 
+querent's specific question or situation."""
+    
+    try:
+        def format_sse(payload: dict) -> str:
+            return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+        message_id = f"msg-{uuid.uuid4().hex}"
+        text_stream_id = "text-1"
+        
+        yield format_sse({"type": "start", "messageId": message_id})
+        yield format_sse({"type": "text-start", "id": text_stream_id})
+
+        # Convert messages to Ollama format
+        ollama_messages = []
+        
+        # Add system message
+        ollama_messages.append({
+            "role": "system",
+            "content": TAROT_SYSTEM_PROMPT
+        })
+        
+        # Add conversation messages
+        for msg in messages:
+            if msg.get("role") == "system":
+                continue  # Skip system messages as we already added our own
+            ollama_messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            })
+
+        # Prepare Ollama request
+        ollama_request = {
+            "model": model,
+            "messages": ollama_messages,
+            "stream": True,
+            "options": {
+                "temperature": 0.8,
+                "num_ctx": 4096,
+                "num_predict": 1500,
+            }
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            async with client.stream(
+                "POST",
+                f"{ollama_url}/api/chat",
+                json=ollama_request,
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                if response.status_code != 200:
+                    raise Exception(f"Ollama API error: {response.status_code}")
+                
+                async for line in response.aiter_lines():
+                    if line.strip():
+                        try:
+                            chunk = json.loads(line)
+                            
+                            if chunk.get("done", False):
+                                # Stream is complete
+                                break
+                            
+                            if "message" in chunk and "content" in chunk["message"]:
+                                content = chunk["message"]["content"]
+                                if content:
+                                    yield format_sse({
+                                        "type": "text-delta",
+                                        "id": text_stream_id,
+                                        "delta": content
+                                    })
+                        except json.JSONDecodeError:
+                            continue
+
+        yield format_sse({"type": "text-end", "id": text_stream_id})
+        yield format_sse({
+            "type": "finish",
+            "messageMetadata": {"finishReason": "stop"}
+        })
+        yield "data: [DONE]\n\n"
+
+    except Exception as e:
+        traceback.print_exc()
+        yield format_sse({
+            "type": "error",
+            "error": str(e)
+        })
+        raise
