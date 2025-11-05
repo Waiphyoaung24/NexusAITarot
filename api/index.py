@@ -47,23 +47,35 @@ async def handle_chat_data(request: Request, protocol: str = Query('data')):
 
 @app.post("/api/chat/ollama")
 async def handle_ollama_chat(request: OllamaRequest, protocol: str = Query('data')):
+    print(f"Received Ollama chat request: model={request.model}, url={request.ollama_url}")
+    print(f"Messages: {request.messages}")
+    
     messages = request.messages
     ollama_messages = convert_to_openai_messages(messages)
+    
+    print(f"Converted messages: {ollama_messages}")
     
     # Check if Ollama is available
     try:
         async with httpx.AsyncClient() as client:
-            health_response = await client.get(f"{request.ollama_url}/api/tags", timeout=5.0)
+            health_response = await client.get(f"{request.ollama_url}/api/tags", timeout=10.0)
             if health_response.status_code != 200:
+                print(f"Ollama health check failed: {health_response.status_code}")
                 raise HTTPException(status_code=503, detail="Ollama service is not available")
-    except httpx.RequestError:
+            print("Ollama health check passed")
+    except httpx.RequestError as e:
+        print(f"Cannot connect to Ollama: {e}")
         raise HTTPException(status_code=503, detail="Cannot connect to Ollama service")
     
-    response = StreamingResponse(
-        stream_ollama_text(request.ollama_url, request.model, ollama_messages, protocol),
-        media_type="text/event-stream",
-    )
-    return patch_response_with_headers(response, protocol)
+    try:
+        response = StreamingResponse(
+            stream_ollama_text(request.ollama_url, request.model, ollama_messages, protocol),
+            media_type="text/event-stream",
+        )
+        return patch_response_with_headers(response, protocol)
+    except Exception as e:
+        print(f"Error creating streaming response: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/api/ollama/models")
 async def get_ollama_models(ollama_url: str = Query("http://localhost:11434")):

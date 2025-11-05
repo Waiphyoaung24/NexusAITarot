@@ -281,25 +281,21 @@ querent's specific question or situation."""
         # Convert messages to Ollama format
         ollama_messages = []
         
-        # Add system message
-        ollama_messages.append({
-            "role": "system",
-            "content": TAROT_SYSTEM_PROMPT
-        })
-        
-        # Add conversation messages
+        # Add conversation messages (system prompt will be added separately)
         for msg in messages:
-            if msg.get("role") == "system":
-                continue  # Skip system messages as we already added our own
-            ollama_messages.append({
-                "role": msg.get("role", "user"),
-                "content": msg.get("content", "")
-            })
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role and content:
+                ollama_messages.append({
+                    "role": role,
+                    "content": content
+                })
 
-        # Prepare Ollama request
+        # Prepare Ollama request with system prompt
         ollama_request = {
             "model": model,
             "messages": ollama_messages,
+            "system": TAROT_SYSTEM_PROMPT,  # Use system field instead of system message
             "stream": True,
             "options": {
                 "temperature": 0.8,
@@ -308,35 +304,48 @@ querent's specific question or situation."""
             }
         }
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream(
-                "POST",
+        print(f"Sending request to Ollama: {ollama_url}/api/chat")
+        print(f"Model: {model}")
+        print(f"Messages count: {len(ollama_messages)}")
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
                 f"{ollama_url}/api/chat",
                 json=ollama_request,
                 headers={"Content-Type": "application/json"}
-            ) as response:
-                if response.status_code != 200:
-                    raise Exception(f"Ollama API error: {response.status_code}")
-                
-                async for line in response.aiter_lines():
-                    if line.strip():
-                        try:
-                            chunk = json.loads(line)
-                            
-                            if chunk.get("done", False):
-                                # Stream is complete
-                                break
-                            
-                            if "message" in chunk and "content" in chunk["message"]:
-                                content = chunk["message"]["content"]
-                                if content:
-                                    yield format_sse({
-                                        "type": "text-delta",
-                                        "id": text_stream_id,
-                                        "delta": content
-                                    })
-                        except json.JSONDecodeError:
-                            continue
+            )
+            
+            if response.status_code != 200:
+                error_text = await response.atext()
+                print(f"Ollama API error {response.status_code}: {error_text}")
+                raise Exception(f"Ollama API error: {response.status_code} - {error_text}")
+            
+            # Handle streaming response
+            async for line in response.aiter_lines():
+                if line.strip():
+                    try:
+                        chunk = json.loads(line)
+                        print(f"Received chunk: {chunk}")
+                        
+                        if chunk.get("done", False):
+                            print("Stream completed")
+                            break
+                        
+                        if "message" in chunk and "content" in chunk["message"]:
+                            content = chunk["message"]["content"]
+                            if content:
+                                print(f"Streaming content: {content}")
+                                yield format_sse({
+                                    "type": "text-delta",
+                                    "id": text_stream_id,
+                                    "delta": content
+                                })
+                    except json.JSONDecodeError as e:
+                        print(f"JSON decode error: {e}")
+                        continue
+                    except Exception as e:
+                        print(f"Error processing chunk: {e}")
+                        continue
 
         yield format_sse({"type": "text-end", "id": text_stream_id})
         yield format_sse({
@@ -346,6 +355,7 @@ querent's specific question or situation."""
         yield "data: [DONE]\n\n"
 
     except Exception as e:
+        print(f"Stream error: {e}")
         traceback.print_exc()
         yield format_sse({
             "type": "error",
